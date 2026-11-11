@@ -34,13 +34,27 @@ bool SurfaceHIDNub::start(IOService *provider) {
         return false;
     
     SurfaceHIDDescriptor desc;
-    if (getHIDDescriptor(SurfaceLegacyKeyboardDevice, &desc) != kIOReturnSuccess) {
+    memset(&desc, 0, sizeof(desc));
+    if (getHIDDescriptor(SurfaceLegacyKeyboardDevice, &desc) != kIOReturnSuccess
+        || desc.desc_len != sizeof(SurfaceHIDDescriptor)
+        || desc.desc_type != 0x21) {
         legacy = false;
-        if (getHIDDescriptor(SurfaceKeyboardDevice, &desc) != kIOReturnSuccess)
-            return false;
+        hid_tid = SSH_TID_SECONDARY;
+        memset(&desc, 0, sizeof(desc));
+        if (getHIDDescriptor(SurfaceKeyboardDevice, &desc) != kIOReturnSuccess
+            || desc.desc_len != sizeof(SurfaceHIDDescriptor)
+            || desc.desc_type != 0x21) {
+            hid_tid = SSH_TID_PRIMARY;
+            memset(&desc, 0, sizeof(desc));
+            if (getHIDDescriptor(SurfaceKeyboardDevice, &desc) != kIOReturnSuccess
+                || desc.desc_len != sizeof(SurfaceHIDDescriptor)
+                || desc.desc_type != 0x21)
+                return false;
+        }
     }
-    LOG("HID version %d", !legacy+1);
+    LOG("HID version %d (tid %u)", !legacy+1, hid_tid);
     setProperty(SURFACE_LEGACY_HID_STRING, legacy);
+    setProperty("SurfaceHIDTargetID", hid_tid, 8);
     
     PMinit();
     ssh->joinPMtree(this);
@@ -73,10 +87,15 @@ IOReturn SurfaceHIDNub::registerHIDEvent(OSObject* owner, EventHandler _handler)
     if (legacy)
         ret = ssh->registerEvent(this, SurfaceSerialEventHostManagedV1, SSH_TC_KBD, SurfaceLegacyKeyboardDevice);
     else {
-        ret = ssh->registerEvent(this, SurfaceSerialEventHostManagedV2, SSH_TC_HID, SurfaceKeyboardDevice);
-        if (ret == kIOReturnSuccess)
-            ret = ssh->registerEvent(this, SurfaceSerialEventHostManagedV2, SSH_TC_HID, SurfaceTouchpadDevice);
+        SurfaceSerialEventRegistryType reg_type = (hid_tid == SSH_TID_PRIMARY) ? SurfaceSerialEventHostManagedV2Primary : SurfaceSerialEventHostManagedV2;
+        ret = ssh->registerEvent(this, reg_type, SSH_TC_HID, SurfaceKeyboardDevice);
+        if (ret == kIOReturnSuccess) {
+            ret = ssh->registerEvent(this, reg_type, SSH_TC_HID, SurfaceTouchpadDevice);
+            if (ret != kIOReturnSuccess)
+                ssh->unregisterEvent(this, reg_type, SSH_TC_HID, SurfaceKeyboardDevice);
+        }
     }
+    setProperty("SurfaceHIDEventStatus", ret, 32);
     if (ret != kIOReturnSuccess)
         return ret;
     
@@ -92,8 +111,9 @@ void SurfaceHIDNub::unregisterHIDEvent(OSObject* owner) {
         if (legacy)
             ssh->unregisterEvent(this, SurfaceSerialEventHostManagedV1, SSH_TC_KBD, SurfaceLegacyKeyboardDevice);
         else {
-            ssh->unregisterEvent(this, SurfaceSerialEventHostManagedV2, SSH_TC_HID, SurfaceKeyboardDevice);
-            ssh->unregisterEvent(this, SurfaceSerialEventHostManagedV2, SSH_TC_HID, SurfaceTouchpadDevice);
+            SurfaceSerialEventRegistryType reg_type = (hid_tid == SSH_TID_PRIMARY) ? SurfaceSerialEventHostManagedV2Primary : SurfaceSerialEventHostManagedV2;
+            ssh->unregisterEvent(this, reg_type, SSH_TC_HID, SurfaceKeyboardDevice);
+            ssh->unregisterEvent(this, reg_type, SSH_TC_HID, SurfaceTouchpadDevice);
         }
         target = nullptr;
         handler = nullptr;
@@ -111,7 +131,7 @@ void SurfaceHIDNub::eventReceived(UInt8 tc, UInt8 tid, UInt8 iid, UInt8 cid, UIn
         
         device = SurfaceLegacyKeyboardDevice;
     } else {
-        if (cid != SSH_EVENT_CID_HID_INPUT || tid != SSH_TID_SECONDARY)
+        if (cid != SSH_EVENT_CID_HID_INPUT || tid != hid_tid)
             goto error;
         
         switch (iid) {
@@ -167,6 +187,7 @@ IOReturn SurfaceHIDNub::getData(SurfaceHIDDeviceType device, SurfaceHIDDescripto
     UInt16 remain_len = buffer_len;
     UInt16 response_len;
     
+    memset(cache, 0, sizeof(cache));
     cache_as_buf->entry = entry;
     cache_as_buf->finished = false;
     
@@ -176,7 +197,7 @@ IOReturn SurfaceHIDNub::getData(SurfaceHIDDeviceType device, SurfaceHIDDescripto
         cache_as_buf->offset = offset;
         cache_as_buf->length = length;
 
-        if (ssh->getResponse(SSH_TC_HID, SSH_TID_SECONDARY, device, SSH_CID_HID_GET_DESCRIPTOR, cache, SURFACE_HID_DESC_HEADER_SIZE, true, cache, response_len) != kIOReturnSuccess) {
+        if (ssh->getResponse(SSH_TC_HID, hid_tid, device, SSH_CID_HID_GET_DESCRIPTOR, cache, SURFACE_HID_DESC_HEADER_SIZE, true, cache, response_len) != kIOReturnSuccess) {
             LOG("Failed to get data from SSH!");
             return kIOReturnError;
         }
@@ -226,13 +247,13 @@ IOReturn SurfaceHIDNub::getHIDRawReport(SurfaceHIDDeviceType device, UInt8 repor
         memcpy(buffer, report, SURFACE_LEGACY_FEAT_REPORT_SIZE);
         return kIOReturnSuccess;
     } else
-        return ssh->getResponse(SSH_TC_HID, SSH_TID_SECONDARY, device, SSH_CID_HID_GET_FEAT_REPORT, &report_id, 1, true, buffer, len);
+        return ssh->getResponse(SSH_TC_HID, hid_tid, device, SSH_CID_HID_GET_FEAT_REPORT, &report_id, 1, true, buffer, len);
 }
 
 void SurfaceHIDNub::setHIDRawReport(SurfaceHIDDeviceType device, UInt8 report_id, bool feature, UInt8 *buffer, UInt16 len) {
     if (!legacy) {
         UInt8 cid = feature ? SSH_CID_HID_SET_FEAT_REPORT : SSH_CID_HID_OUT_REPORT;
         buffer[0] = report_id;
-        ssh->sendCommand(SSH_TC_HID, SSH_TID_SECONDARY, device, cid, buffer, len, true);
+        ssh->sendCommand(SSH_TC_HID, hid_tid, device, cid, buffer, len, true);
     }
 }

@@ -33,6 +33,12 @@ jobs:
           perl -0pi -e 's/(LOG\("Failed to connect to UART controller!"\);)/$1 provider->setProperty("dbg-hub", "connect-failed");/; s/(LOG\("Failed to get SAM version! UART probably misconfigured!"\);)/$1 provider->setProperty("dbg-hub", "sam-timeout");/' "$H"
           grep -n "dbg-" "$U" "$H"
 
+      - name: Increase SurfaceHIDDriver report buffer capacity for SLS1 touchpad (44B > 32B)
+        run: |
+          D=$(find Dependencies/BigSurfaceHIDDriver -name SurfaceHIDDriver.cpp)
+          perl -0pi -e 's/(if \(!ready\)\n        return;)/$1\n    if (!buffer || !len || len > 256)\n        return;/; s/withCapacity\(32, kIODirectionNone\)/withCapacity(256, kIODirectionNone)/g' "$D"
+          grep -n -C 2 "256" "$D"
+
       - name: Fetch Lilu + VirtualSMC SDKs
         env:
           GH_TOKEN: ${{ github.token }}

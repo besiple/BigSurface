@@ -18,6 +18,7 @@
 enum SurfaceSerialEventRegistryType {
     SurfaceSerialEventHostManagedV1 = 0,
     SurfaceSerialEventHostManagedV2,
+    SurfaceSerialEventHostManagedV2Primary,
     SurfaceSerialEventHubManaged,
     SurfaceSerialEventTypeCount
 };

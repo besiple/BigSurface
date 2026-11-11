@@ -92,6 +92,7 @@ private:
     EventHandler            handler {nullptr};
 
     bool    legacy {true};
+    UInt8   hid_tid {SSH_TID_SECONDARY};
 
     IOReturn getDescriptorData(SurfaceHIDDeviceType device, SurfaceHIDDescriptorEntryType entry, UInt8 *buffer, UInt16 buffer_len);
     
